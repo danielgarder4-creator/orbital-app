@@ -1,0 +1,394 @@
+// ──────────────────────────────────────────────────────────────
+// ORBITAL — Database Schema
+// PostgreSQL via Prisma. Run `npm run db:push` (dev) or
+// `npm run db:migrate` (versioned) after setting DATABASE_URL.
+// ──────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────── Auth & Identity ─────────────
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  passwordHash  String?
+  name          String?
+  image         String?
+  role          Role      @default(USER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  profile          Profile?
+  subscription     Subscription?
+  stores           Store[]
+  importedProducts ImportedProduct[]
+  aiRequests       AIRequest[]
+  aiUsage          AIUsage?
+  payments         Payment[]
+  generatedContent GeneratedContent[]
+  sessions         Session[]
+  accounts         Account[]
+
+  @@index([email])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// Onboarding answers — used to personalize AI Product Finder & Store Builder defaults
+model Profile {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  productNiche   String?
+  targetMarket   String?
+  monthlyBudget  String?
+  hasExistingStore Boolean @default(false)
+  experienceLevel String? // beginner | intermediate | advanced
+  onboardedAt    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ───────────── Billing ─────────────
+
+enum PlanTier {
+  FREE
+  PRO
+}
+
+enum SubscriptionStatus {
+  NONE
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+}
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String             @unique
+  plan                 PlanTier           @default(FREE)
+  status               SubscriptionStatus @default(NONE)
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  stripePriceId        String?
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  freeProductUsed      Boolean            @default(false) // the single free import
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payments Payment[]
+
+  @@index([stripeCustomerId])
+}
+
+enum PaymentStatus {
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  PENDING
+}
+
+model Payment {
+  id                    String        @id @default(cuid())
+  userId                String
+  subscriptionId        String?
+  stripeInvoiceId       String?       @unique
+  amountCents           Int
+  currency               String        @default("eur")
+  status                PaymentStatus
+  createdAt             DateTime      @default(now())
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@index([userId])
+}
+
+// ───────────── Products & Research ─────────────
+
+enum CompetitionLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+// A product surfaced by the AI Product Finder, before a user imports it
+model DiscoveredProduct {
+  id                String           @id @default(cuid())
+  title             String
+  imageUrl          String?
+  supplier          String
+  costCents         Int
+  suggestedPriceCents Int
+  competition       CompetitionLevel
+  demandScore       Int              // 0-100
+  trendScore        Int              // 0-100
+  opportunityScore  Int              // 0-100, blended AI score
+  category          String?
+  sourceQuery       String?          // the natural-language search that surfaced it
+  raw               Json?            // raw supplier payload for audit/debug
+  createdAt         DateTime         @default(now())
+
+  imports ImportedProduct[]
+
+  @@index([opportunityScore])
+}
+
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model ImportedProduct {
+  id                  String        @id @default(cuid())
+  userId              String
+  storeId             String?
+  discoveredProductId String?
+  title               String
+  description         String?       @db.Text
+  bulletPoints         String[]
+  seoTitle            String?
+  seoDescription       String?
+  tags                String[]
+  collection           String?
+  costCents            Int
+  priceCents           Int
+  status               ProductStatus @default(DRAFT)
+  images                ProductImage[]
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  store             Store?             @relation(fields: [storeId], references: [id])
+  discoveredProduct DiscoveredProduct? @relation(fields: [discoveredProductId], references: [id])
+  orderItems        OrderItem[]
+  performance       ProductPerformance?
+
+  @@index([userId])
+  @@index([storeId])
+}
+
+model ProductImage {
+  id          String   @id @default(cuid())
+  productId   String
+  url         String
+  kind        String   // "studio" | "lifestyle" | "social" | "ad" | "original"
+  createdAt   DateTime @default(now())
+
+  product ImportedProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model ProductPerformance {
+  id             String   @id @default(cuid())
+  productId      String   @unique
+  views          Int      @default(0)
+  addToCarts     Int      @default(0)
+  purchases      Int      @default(0)
+  revenueCents   Int      @default(0)
+  updatedAt      DateTime @updatedAt
+
+  product ImportedProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+// ───────────── Store ─────────────
+
+model Store {
+  id           String   @id @default(cuid())
+  userId       String
+  name         String
+  slug         String   @unique
+  niche        String?
+  logoUrl      String?
+  primaryColor String?
+  accentColor  String?
+  homepageCopy Json?    // generated hero/about/faq blocks
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  products ImportedProduct[]
+  orders   Order[]
+
+  @@index([userId])
+}
+
+// ───────────── Orders ─────────────
+
+enum OrderStatus {
+  PENDING
+  FULFILLED
+  CANCELED
+  REFUNDED
+}
+
+model Order {
+  id            String      @id @default(cuid())
+  storeId       String
+  customerId    String
+  totalCents    Int
+  status        OrderStatus @default(PENDING)
+  createdAt     DateTime    @default(now())
+
+  store    Store       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  customer Customer    @relation(fields: [customerId], references: [id])
+  items    OrderItem[]
+
+  @@index([storeId])
+}
+
+model OrderItem {
+  id         String @id @default(cuid())
+  orderId    String
+  productId  String
+  quantity   Int    @default(1)
+  priceCents Int
+
+  order   Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product ImportedProduct @relation(fields: [productId], references: [id])
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  email     String
+  name      String?
+  createdAt DateTime @default(now())
+
+  orders Order[]
+
+  @@unique([email])
+}
+
+// ───────────── Suppliers ─────────────
+
+model Supplier {
+  id            String   @id @default(cuid())
+  name          String
+  region        String?
+  avgShipDays   Int?
+  reliability   Int?     // 0-100 AI-estimated reliability score
+  categories    String[]
+  createdAt     DateTime @default(now())
+}
+
+// ───────────── AI Usage & Generated Content ─────────────
+
+enum AIFeature {
+  PRODUCT_TITLE
+  PRODUCT_DESCRIPTION
+  PRODUCT_RESEARCH
+  PRODUCT_ANALYSIS
+  AD_COPY
+  SOCIAL_CONTENT
+  SEO
+  STORE_BUILDER
+  IMAGE_GENERATION
+  PRICING_SUGGESTION
+}
+
+model AIRequest {
+  id          String    @id @default(cuid())
+  userId      String
+  feature     AIFeature
+  prompt      String    @db.Text
+  response    String?   @db.Text
+  tokensUsed  Int?
+  latencyMs   Int?
+  succeeded   Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// Rolling usage counters for plan-limit enforcement
+model AIUsage {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  periodStart       DateTime @default(now())
+  requestsThisPeriod Int     @default(0)
+  imagesThisPeriod   Int     @default(0)
+  updatedAt          DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model GeneratedContent {
+  id        String    @id @default(cuid())
+  userId    String
+  feature   AIFeature
+  kind      String    // "ad_script" | "social_post" | "seo_meta" | "store_copy" | etc.
+  payload   Json
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, feature])
+}
+
+// ───────────── Platform Analytics (admin rollups) ─────────────
+
+model PlatformMetricSnapshot {
+  id                    String   @id @default(cuid())
+  date                  DateTime @unique @db.Date
+  totalUsers            Int
+  activeSubscriptions   Int
+  mrrCents              Int
+  newUsers              Int
+  canceledSubscriptions Int
+  productImports        Int
+  aiRequests            Int
+  createdAt             DateTime @default(now())
+}
