@@ -18,7 +18,7 @@ const PROTECTED_PREFIXES = [
   "/settings", "/billing",
 ];
 
-export default auth((req: NextRequest & { auth?: { user?: { role?: string } } }) => {
+export default auth((req) => {
   const { pathname } = req.nextUrl;
   const session = (req as any).auth;
 
